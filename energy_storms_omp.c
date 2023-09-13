@@ -181,8 +181,7 @@ int main(int argc, char *argv[]) {
 
     /* 3. Allocate memory for the layer and initialize to zero */
     float *layer = (float *)calloc(layer_size, sizeof(float));
-    float *layer_copy = (float *)calloc(layer_size, sizeof(float));
-    if ( layer == NULL || layer_copy == NULL ) {
+    if ( layer == NULL ) {
         fprintf(stderr,"Error: Allocating the layer memory\n");
         exit( EXIT_FAILURE );
     }
@@ -223,16 +222,17 @@ int main(int argc, char *argv[]) {
 	t1 = cp_Wtime(); 
 
 	/* 4.2. Energy relaxation between storms */
-        /* 4.2.1. Copy values to the ancillary array */
-        //#pragma omp parallel for default(shared)
-        for(int k=0; k<layer_size; k++ ) 
-            layer_copy[k] = layer[k];
-
         /* 4.2.2. Update layer using the ancillary values.
                   Skip updating the first and last positions */
+        float prev = layer[0];
+        for(int k=1; k<layer_size-1; k++ ) {
+            double cur = layer[k];
+            layer[k] = ( prev + layer[k] + layer[k+1] ) / 3;
+            prev = cur;
+	}
         //#pragma omp parallel for default(shared)
-        for(int k=1; k<layer_size-1; k++ )
-            layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3;
+//        for(int k=1; k<layer_size-1; k++ )
+//            layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3;
 
 	printf("End update ancillary values: %lf (%lf)\n", cp_Wtime() - t1, cp_Wtime() - ttotal);
 	t1 = cp_Wtime(); 
