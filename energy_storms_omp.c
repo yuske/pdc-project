@@ -206,7 +206,7 @@ int main(int argc, char *argv[]) {
                   Skip updating the first and last positions */
         float prev = layer[0];
         for(int k=1; k<layer_size-1; k++ ) {
-            double cur = layer[k];
+            float cur = layer[k];
             layer[k] = ( prev + layer[k] + layer[k+1] ) / 3;
             prev = cur;
 	}
