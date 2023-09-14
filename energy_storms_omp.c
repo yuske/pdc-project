@@ -36,8 +36,6 @@
 double cp_Wtime(){
     struct timeval tv;
     gettimeofday(&tv, NULL);
-    //double res = tv.tv_sec + 1.0e-6 * tv.tv_usec; 
-    //printf("SEC: %ld, USEC: %ld, RES: %lf\n", tv.tv_sec, tv.tv_usec, res);
     return tv.tv_sec + 1.0e-6 * tv.tv_usec;
 }
 
@@ -188,9 +186,8 @@ int main(int argc, char *argv[]) {
     
     /* 4. Storms simulation */
     for(int i=0; i<num_storms; i++) {
-
-	printf("Start storm %d (%lf)\n", i, cp_Wtime() - ttotal);
-	double t1 = cp_Wtime();
+//	printf("Start storm %d (%lf)\n", i, cp_Wtime() - ttotal);
+//	double t1 = cp_Wtime();
         /* 4.1. Add impacts energies to layer cells */
         #pragma omp parallel for default(shared)
 	for (int k = 0; k < layer_size; k++) {
@@ -200,26 +197,9 @@ int main(int argc, char *argv[]) {
                 update(layer, layer_size, k, position, energy);
 	    }
 	}
-//        /* For each particle */
-//        for(int j=0; j<storms[i].size; j++ ) {
-//            /* Get impact energy (expressed in thousandths) */
-//            float energy = (float)storms[i].posval[j*2+1] * 1000;
-//            /* Get impact position */
-//            int position = storms[i].posval[j*2];
-//
-//            /* For each cell in the layer */
-//	    //printf("start\n");
-//            #pragma omp parallel for default(shared)
-//            for(int k=0; k<layer_size; k++ ) {
-//                /* Update the energy value for the cell */
-//                update(layer, layer_size, k, position, energy);
-//            }
-//
-//	    //printf("end\n");
-//        }
 
-	printf("End updates: %lf (%lf)\n", cp_Wtime() - t1, cp_Wtime() - ttotal);
-	t1 = cp_Wtime(); 
+//	printf("End updates: %lf (%lf)\n", cp_Wtime() - t1, cp_Wtime() - ttotal);
+//	t1 = cp_Wtime(); 
 
 	/* 4.2. Energy relaxation between storms */
         /* 4.2.2. Update layer using the ancillary values.
@@ -234,8 +214,8 @@ int main(int argc, char *argv[]) {
 //        for(int k=1; k<layer_size-1; k++ )
 //            layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3;
 
-	printf("End update ancillary values: %lf (%lf)\n", cp_Wtime() - t1, cp_Wtime() - ttotal);
-	t1 = cp_Wtime(); 
+//	printf("End update ancillary values: %lf (%lf)\n", cp_Wtime() - t1, cp_Wtime() - ttotal);
+//	t1 = cp_Wtime(); 
         
 	/* 4.3. Locate the maximum value in the layer, and its position */
         for(int k=1; k<layer_size-1; k++ ) {
@@ -248,8 +228,8 @@ int main(int argc, char *argv[]) {
             }
         }
 
-	printf("End maximum calc: %lf (%lf)\n", cp_Wtime() - t1, cp_Wtime() - ttotal);
-	t1 = cp_Wtime(); 
+//	printf("End maximum calc: %lf (%lf)\n", cp_Wtime() - t1, cp_Wtime() - ttotal);
+//	t1 = cp_Wtime(); 
     }
 
     /* END: Do NOT optimize/parallelize the code below this point */
