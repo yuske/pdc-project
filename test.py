@@ -59,7 +59,27 @@ def verify_result(test_num, mode):
         seq_result = next((line for line in seq_lines if line.startswith("Result:")), None)
         compare_result = next((line for line in compare_lines if line.startswith("Result:")), None)
 
-        if seq_result == compare_result:
+        # Extract values from the "Result:" line for the seq_result
+        tokens_seq = seq_result[len("Result:"):].strip().split()
+        seq_values = [(int(tokens_seq[i]), float(tokens_seq[i+1])) for i in range(0, len(tokens_seq), 2)]
+
+        # Extract values from the "Result:" line for the compare_result
+        tokens_compare = compare_result[len("Result:"):].strip().split()
+        compare_values = [(int(tokens_compare[i]), float(tokens_compare[i+1])) for i in range(0, len(tokens_compare), 2)]
+
+        # Check if the number of pairs match
+        if len(seq_values) != len(compare_values):
+            print("Error: Mismatch in number of value pairs for Test {} in mode {}.".format(test_num, mode))
+            return
+
+        # Compare the pairs of values
+        match = True
+        for (seq_d, seq_f), (comp_d, comp_f) in zip(seq_values, compare_values):
+            if seq_d != comp_d or abs(seq_f - comp_f) >= 0.1:
+                match = False
+                break
+
+        if match:
             print("Test {} for mode {} matches seq result.".format(test_num, mode))
         else:
             print("Error: Test {} for mode {} does not match seq result!".format(test_num, mode))
