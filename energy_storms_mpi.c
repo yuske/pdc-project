@@ -76,11 +76,10 @@ void update( float *layer, int layer_size, int k, int pos, float energy ) {
 /* ANCILLARY FUNCTIONS: These are not called from the code section which is measured, leave untouched */
 /* DEBUG function: Prints the layer status */
 void debug_print(int layer_size, float *layer, int *positions, float *maximum, int num_storms ) {
-    int i,k;
     /* Only print for array size up to 35 (change it for bigger sizes if needed) */
     if ( layer_size <= 35 ) {
         /* Traverse layer */
-        for( k=0; k<layer_size; k++ ) {
+        for(int k=0; k<layer_size; k++ ) {
             /* Print the energy value of the current cell */
             printf("%10.4f |", layer[k] );
 
@@ -89,7 +88,7 @@ void debug_print(int layer_size, float *layer, int *positions, float *maximum, i
             int ticks = (int)( 60 * layer[k] / maximum[num_storms-1] );
 
             /* Print all characters except the last one */
-            for (i=0; i<ticks-1; i++ ) printf("o");
+            for (int i=0; i<ticks-1; i++ ) printf("o");
 
             /* If the cell is a local maximum print a special trailing character */
             if ( k>0 && k<layer_size-1 && layer[k] > layer[k-1] && layer[k] > layer[k+1] )
@@ -98,7 +97,7 @@ void debug_print(int layer_size, float *layer, int *positions, float *maximum, i
                 printf("o");
 
             /* If the cell is the maximum of any storm, print the storm mark */
-            for (i=0; i<num_storms; i++) 
+            for (int i=0; i<num_storms; i++) 
                 if ( positions[i] == k ) printf(" M%d", i );
 
             /* Line feed */
@@ -131,7 +130,7 @@ Storm read_storm_file( char *fname ) {
     }
     
     int elem;
-    for ( elem=0; elem<storm.size; elem++ ) {
+    for (int elem=0; elem<storm.size; elem++ ) {
         ok = fscanf(fstorm, "%d %d\n", 
                     &(storm.posval[elem*2]),
                     &(storm.posval[elem*2+1]) );
@@ -168,13 +167,13 @@ int main(int argc, char *argv[]) {
     Storm storms[ num_storms ];
 
     /* 1.2. Read storms information */
-    for( i=2; i<argc; i++ ) 
+    for(int i=2; i<argc; i++ ) 
         storms[i-2] = read_storm_file( argv[i] );
 
     /* 1.3. Intialize maximum levels to zero */
     float maximum[ num_storms ];
     int positions[ num_storms ];
-    for (i=0; i<num_storms; i++) {
+    for (int i=0; i<num_storms; i++) {
         maximum[i] = 0.0f;
         positions[i] = 0;
     }
@@ -185,52 +184,90 @@ int main(int argc, char *argv[]) {
 
     /* START: Do NOT optimize/parallelize the code of the main program above this point */
 
-    /* 3. Allocate memory for the layer and initialize to zero */
-    float *layer = (float *)malloc( sizeof(float) * layer_size );
-    float *layer_copy = (float *)malloc( sizeof(float) * layer_size );
-    if ( layer == NULL || layer_copy == NULL ) {
-        fprintf(stderr,"Error: Allocating the layer memory\n");
-        exit( EXIT_FAILURE );
-    }
-    for( k=0; k<layer_size; k++ ) layer[k] = 0.0f;
-    for( k=0; k<layer_size; k++ ) layer_copy[k] = 0.0f;
-    
-    /* 4. Storms simulation */
-    for( i=0; i<num_storms; i++) {
-
-        /* 4.1. Add impacts energies to layer cells */
-        /* For each particle */
-        for( j=0; j<storms[i].size; j++ ) {
-            /* Get impact energy (expressed in thousandths) */
-            float energy = (float)storms[i].posval[j*2+1] * 1000;
-            /* Get impact position */
-            int position = storms[i].posval[j*2];
-
-            /* For each cell in the layer */
-            for( k=0; k<layer_size; k++ ) {
-                /* Update the energy value for the cell */
-                update( layer, layer_size, k, position, energy );
-            }
+    if (rank == 0) {
+        /* 3. Allocate memory for the layer and initialize to zero */
+        float **layers = malloc(num_storms * sizeof(float*));
+        if ( layers == NULL ) {
+            fprintf(stderr,"Error: Allocating the layer memory\n");
+            exit( EXIT_FAILURE );
         }
 
-        /* 4.2. Energy relaxation between storms */
-        /* 4.2.1. Copy values to the ancillary array */
-        for( k=0; k<layer_size; k++ ) 
-            layer_copy[k] = layer[k];
+        // Recive layers
+        int taskCount = num_storms;
+        while (taskCount > 0) {
+            float *recivedLayer = (float *)malloc( sizeof(float) * layer_size );
+	    MPI_Status status;
+            MPI_Recv(recivedLayer, layer_size, MPI_FLOAT, 
+                MPI_ANY_SOURCE, MPI_ANY_TAG, MPI_COMM_WORLD, &status);
+            int layerIndex = status.MPI_TAG;
+//            printf("Process the layer %d from %d\n", layerIndex, status.MPI_SOURCE);
+            layers[layerIndex] = recivedLayer;
+            taskCount--;
+        }
 
-        /* 4.2.2. Update layer using the ancillary values.
-                  Skip updating the first and last positions */
-        for( k=1; k<layer_size-1; k++ )
-            layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3;
+        /* 4. Storms simulation */
+        float *layer = layers[0];
+        for(int i=0; i<num_storms; i++) {
+            /* 4.2. Energy relaxation between storms */
+            /* 4.2.2. Update layer using the ancillary values.
+                      Skip updating the first and last positions */
+            float prev = layer[0];
+            for(int k=1; k<layer_size-1; k++ ) {
+                float cur = layer[k];
+                layer[k] = ( prev + layer[k] + layer[k+1] ) / 3;
+                prev = cur;
+            }
 
-        /* 4.3. Locate the maximum value in the layer, and its position */
-        for( k=1; k<layer_size-1; k++ ) {
-            /* Check it only if it is a local maximum */
-            if ( layer[k] > layer[k-1] && layer[k] > layer[k+1] ) {
-                if ( layer[k] > maximum[i] ) {
-                    maximum[i] = layer[k];
-                    positions[i] = k;
+            /* 4.3. Locate the maximum value in the layer, and its position */
+            for(int k=1; k<layer_size-1; k++ ) {
+                /* Check it only if it is a local maximum */
+                if ( layer[k] > layer[k-1] && layer[k] > layer[k+1] ) {
+                    if ( layer[k] > maximum[i] ) {
+                        maximum[i] = layer[k];
+                        positions[i] = k;
+                    }
                 }
+            }
+
+            if (i < num_storms - 1) {
+                for(int k=0; k<layer_size; k++ ) {
+                    layer[k] += layers[i+1][k];
+                }
+            }
+        }
+    } else {
+        int workerCount = size - 1;
+        int index = 0;
+        for(int i = 0; i < num_storms; i++) {
+            if (i % workerCount == rank - 1) {
+                /* 4.1. Add impacts energies to layer cells */
+                /* For each particle */
+                float *layer = (float *)calloc(layer_size, sizeof(float));
+                if (layer == NULL) {
+                    fprintf(stderr,"Error: Allocating the layer memory\n");
+                    exit( EXIT_FAILURE );
+                }
+
+                for(int j=0; j<storms[i].size; j++ ) {
+                    /* Get impact energy (expressed in thousandths) */
+                    float energy = (float)storms[i].posval[j*2+1] * 1000;
+                    /* Get impact position */
+                    int position = storms[i].posval[j*2];
+
+                    /* For each cell in the layer */
+                    for(int k=0; k<layer_size; k++ ) {
+                        /* Update the energy value for the cell */
+                        update( layer, layer_size, k, position, energy );
+                    }
+                }
+
+                // Send layer
+                MPI_Send(layer, layer_size, MPI_FLOAT, 
+                    0,      // destination
+                    i,      // tag
+                    MPI_COMM_WORLD);
+
+		free(layer);
             }
         }
     }
@@ -245,7 +282,7 @@ int main(int argc, char *argv[]) {
 
     /* 6. DEBUG: Plot the result (only for layers up to 35 points) */
     #ifdef DEBUG
-    debug_print( layer_size, layer, positions, maximum, num_storms );
+    debug_print( layer_size, layers[0], positions, maximum, num_storms );
     #endif
 
     /* 7. Results output, used by the Tablon online judge software */
@@ -254,17 +291,18 @@ int main(int argc, char *argv[]) {
     printf("Time: %lf\n", ttotal );
     /* 7.2. Print the maximum levels */
     printf("Result:");
-    for (i=0; i<num_storms; i++)
+    for (int i=0; i<num_storms; i++)
         printf(" %d %f", positions[i], maximum[i] );
+    
     printf("\n");
-
     }
 
     /* 8. Free resources */    
-    for( i=0; i<argc-2; i++ )
+    for(int i=0; i<num_storms; i++ )
         free( storms[i].posval );
 
     /* 9. Program ended successfully */
     return 0;
 }
+
 
