@@ -26,6 +26,7 @@ MPICC=cc
 CUDACC=nvcc
 HIPCC=hipcc
 OMPFLAG= -fopenmp
+HIPFLAGS= --offload-arch=gfx90a
 
 # Flags for optimization and libs
 FLAGS=-O3 -Wall
@@ -68,7 +69,7 @@ energy_storms_cuda: energy_storms_cuda.cu
 	$(CUDACC) $(DEBUG) $< $(LIBS) -o $@
 
 energy_storms_hip: energy_storms_hip.hip
-	$(HIPCC) $(DEBUG) $< $(LIBS) -o $@
+	$(HIPCC) $(DEBUG) $(HIPFLAGS) $< $(LIBS) -o $@
 
 # Remove the target files
 clean:

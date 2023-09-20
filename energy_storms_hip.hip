@@ -59,6 +59,7 @@ double cp_Wtime(){
 
 
 #define THRESHOLD    0.001f
+#define NTHREADS 256
 
 /* Structure used to store data for one storm of particles */
 typedef struct {
@@ -66,9 +67,14 @@ typedef struct {
     int *posval; // Positions and values
 } Storm;
 
+typedef struct {
+    float value;
+    int index;
+} ValIndexPair;
+
 /* THIS FUNCTION CAN BE MODIFIED */
 /* Function to update a single position of the layer */
-void update( float *layer, int layer_size, int k, int pos, float energy ) {
+__device__ void update(float *layer, int layer_size, int k, int pos, float energy) {
     /* 1. Compute the absolute value of the distance between the
         impact position and the k-th position of the layer */
     int distance = pos - k;
@@ -87,7 +93,7 @@ void update( float *layer, int layer_size, int k, int pos, float energy ) {
 
     /* 5. Do not add if its absolute value is lower than the threshold */
     if ( energy_k >= THRESHOLD / layer_size || energy_k <= -THRESHOLD / layer_size )
-        layer[k] = layer[k] + energy_k;
+        layer[threadIdx.x] = layer[threadIdx.x] + energy_k;
 }
 
 
@@ -163,11 +169,78 @@ Storm read_storm_file( char *fname ) {
     return storm;
 }
 
+typedef union  {
+    ValIndexPair pair;
+    unsigned long long int ulong;
+} ValIndexPairAtomic;
+
+__device__ void atomicMax(ValIndexPair* address, float val, int index)
+{
+    ValIndexPairAtomic test;
+    test.pair.value = val;
+    test.pair.index = index;
+
+    ValIndexPairAtomic current;
+    current.pair = *address;
+    while (val > current.pair.value) {
+        current.ulong = atomicCAS((unsigned long long int*)address, current.ulong, test.ulong);
+    }
+}
+
+__global__ void kernel(Storm *storms, int num_storms, int layer_size, ValIndexPair *maximum) {
+    __shared__ float layer1_alloc[NTHREADS];
+    __shared__ float layer2_alloc[NTHREADS];
+    float* layer1 = layer1_alloc;
+    float* layer2 = layer2_alloc;
+    
+    assert(blockDim.x == NTHREADS);
+    int k = blockIdx.x * (blockDim.x - 2) + threadIdx.x;
+    int tid = threadIdx.x;
+    if (k >= layer_size)
+        return;
+
+    layer1[tid] = 0.0f;
+
+    /* 4. Storms simulation */
+    for(int i = 0; i < num_storms; i++) {
+        /* 4.1. Add impacts energies to layer cells */
+        for (int j = 0; j < storms[i].size; j++) {
+            int position = storms[i].posval[j*2];
+            float energy = (float)storms[i].posval[j*2+1] * 1000;
+            update(layer1, layer_size, k, position, energy);
+        }
+
+        __syncthreads();
+        if (tid == 0 || tid == NTHREADS - 1 || k == layer_size - 1) {
+            layer2[tid] = layer1[tid];
+        } else {
+            /* 4.2. Energy relaxation between storms */
+            /* 4.2.2. Update layer using the ancillary values.
+                    Skip updating the first and last positions */
+            layer2[tid] = (layer1[tid-1] + layer1[tid] + layer1[tid+1]) / 3;
+        }
+
+        __syncthreads();
+        if (!(tid == 0 || tid == NTHREADS - 1 || k == layer_size - 1)) {
+            /* 4.3. Locate the maximum value in the layer, and its position */
+            /* Check it only if it is a local maximum */
+            if (layer2[tid] > layer2[tid-1] && layer2[tid] > layer2[tid+1] ) {
+                atomicMax(&maximum[i], layer2[tid], k);
+            }
+        }
+
+        // swap layers 
+        float* tmp = layer1;
+        layer1 = layer2;
+        layer2 = tmp;
+    }
+}
+
+
 /*
  * MAIN PROGRAM
  */
 int main(int argc, char *argv[]) {
-    int i,j,k;
 
     /* 1.1. Read arguments */
     if (argc<3) {
@@ -180,83 +253,60 @@ int main(int argc, char *argv[]) {
     Storm storms[ num_storms ];
 
     /* 1.2. Read storms information */
-    for( i=2; i<argc; i++ ) 
+    for(int i=2; i<argc; i++ ) 
         storms[i-2] = read_storm_file( argv[i] );
 
     /* 1.3. Intialize maximum levels to zero */
-    float maximum[ num_storms ];
-    int positions[ num_storms ];
-    for (i=0; i<num_storms; i++) {
-        maximum[i] = 0.0f;
-        positions[i] = 0;
-    }
+    ValIndexPair maximum[num_storms];
 
     /* 2. Begin time measurement */
-	CHECK_HIP_CALL( hipSetDevice(0) );
-	CHECK_HIP_CALL( hipDeviceSynchronize() );
+    CHECK_HIP_CALL( hipSetDevice(0) );
+    CHECK_HIP_CALL( hipDeviceSynchronize() );
     double ttotal = cp_Wtime();
 
     /* START: Do NOT optimize/parallelize the code of the main program above this point */
 
-    /* 3. Allocate memory for the layer and initialize to zero */
-    float *layer = (float *)malloc( sizeof(float) * layer_size );
-    float *layer_copy = (float *)malloc( sizeof(float) * layer_size );
-    if ( layer == NULL || layer_copy == NULL ) {
-        fprintf(stderr,"Error: Allocating the layer memory\n");
-        exit( EXIT_FAILURE );
+    /* 3.1 Allocate memory for the result */
+    ValIndexPair *d_maximum = NULL;
+    CHECK_HIP_CALL(hipMalloc(&d_maximum, sizeof(ValIndexPair) * num_storms));
+    CHECK_HIP_CALL(hipMemset(d_maximum, 0, sizeof(ValIndexPair) * num_storms));
+
+    /* 3.2 Allocate memory for the input data `storms` and copy the data to the device */
+    Storm *d_storms = NULL;
+    CHECK_HIP_CALL(hipMalloc(&d_storms, sizeof(Storm) * num_storms));
+    CHECK_HIP_CALL(hipMemcpy(d_storms, storms, sizeof(Storm) * num_storms, hipMemcpyHostToDevice));
+    for (int i = 0; i < num_storms; i++) {
+        CHECK_HIP_CALL(hipMalloc(&(d_storms[i].posval), sizeof(int) * storms[i].size * 2));
+        CHECK_HIP_CALL(hipMemcpy(
+            d_storms[i].posval, 
+            storms[i].posval, 
+            sizeof(int) * storms[i].size * 2, 
+            hipMemcpyHostToDevice));
     }
-    for( k=0; k<layer_size; k++ ) layer[k] = 0.0f;
-    for( k=0; k<layer_size; k++ ) layer_copy[k] = 0.0f;
+
+    dim3 threadsPerBlock(NTHREADS);
+    dim3 blocks((layer_size - 3) / (NTHREADS - 2) + 1);
+    hipLaunchKernelGGL(
+        kernel,
+        blocks, threadsPerBlock, 0, 0,
+        d_storms, num_storms, layer_size, d_maximum);
     
-    /* 4. Storms simulation */
-    for( i=0; i<num_storms; i++) {
-
-        /* 4.1. Add impacts energies to layer cells */
-        /* For each particle */
-        for( j=0; j<storms[i].size; j++ ) {
-            /* Get impact energy (expressed in thousandths) */
-            float energy = (float)storms[i].posval[j*2+1] * 1000;
-            /* Get impact position */
-            int position = storms[i].posval[j*2];
-
-            /* For each cell in the layer */
-            for( k=0; k<layer_size; k++ ) {
-                /* Update the energy value for the cell */
-                update( layer, layer_size, k, position, energy );
-            }
-        }
-
-        /* 4.2. Energy relaxation between storms */
-        /* 4.2.1. Copy values to the ancillary array */
-        for( k=0; k<layer_size; k++ ) 
-            layer_copy[k] = layer[k];
-
-        /* 4.2.2. Update layer using the ancillary values.
-                  Skip updating the first and last positions */
-        for( k=1; k<layer_size-1; k++ )
-            layer[k] = ( layer_copy[k-1] + layer_copy[k] + layer_copy[k+1] ) / 3;
-
-        /* 4.3. Locate the maximum value in the layer, and its position */
-        for( k=1; k<layer_size-1; k++ ) {
-            /* Check it only if it is a local maximum */
-            if ( layer[k] > layer[k-1] && layer[k] > layer[k+1] ) {
-                if ( layer[k] > maximum[i] ) {
-                    maximum[i] = layer[k];
-                    positions[i] = k;
-                }
-            }
-        }
-    }
+    /* 4.4. Copy the results from device*/
+    CHECK_HIP_CALL(hipMemcpy(
+            maximum, 
+            d_maximum, 
+            sizeof(ValIndexPair) * num_storms, 
+            hipMemcpyDeviceToHost));
 
     /* END: Do NOT optimize/parallelize the code below this point */
 
     /* 5. End time measurement */
-	CHECK_HIP_CALL( hipDeviceSynchronize() );
+    CHECK_HIP_CALL( hipDeviceSynchronize() );
     ttotal = cp_Wtime() - ttotal;
 
     /* 6. DEBUG: Plot the result (only for layers up to 35 points) */
     #ifdef DEBUG
-    debug_print( layer_size, layer, positions, maximum, num_storms );
+    //debug_print( layer_size, layer, positions, maximum, num_storms );
     #endif
 
     /* 7. Results output, used by the Tablon online judge software */
@@ -265,13 +315,18 @@ int main(int argc, char *argv[]) {
     printf("Time: %lf\n", ttotal );
     /* 7.2. Print the maximum levels */
     printf("Result:");
-    for (i=0; i<num_storms; i++)
-        printf(" %d %f", positions[i], maximum[i] );
+    for (int i = 0; i < num_storms; i++)
+        printf(" %d %f", maximum[i].index, maximum[i].value);
     printf("\n");
 
     /* 8. Free resources */    
-    for( i=0; i<argc-2; i++ )
-        free( storms[i].posval );
+    for(int i = 0; i < num_storms; i++) {
+        free(storms[i].posval);
+        hipFree(d_storms[i].posval);
+    }
+
+    hipFree(d_storms);
+    hipFree(d_maximum);
 
     /* 9. Program ended successfully */
     return 0;
