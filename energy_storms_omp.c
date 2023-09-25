@@ -190,7 +190,7 @@ int main(int argc, char *argv[]) {
 //	double t1 = cp_Wtime();
         /* 4.1. Add impacts energies to layer cells */
         #pragma omp parallel for default(shared)
-	for (int k = 0; k < layer_size; k++) {
+        for (int k = 0; k < layer_size; k++) {
             for (int j = 0; j < storms[i].size; j++) {
                 int position = storms[i].posval[j*2];
                 float energy = (float)storms[i].posval[j*2+1] * 1000;
